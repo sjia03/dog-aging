@@ -1,0 +1,108 @@
+---
+title: "3-bayes-hlm-by-breed"
+output: html_document
+date: "2023-05-30"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+meta_traits_data_std$breed_1 <- as.factor(meta_traits_data_std$breed_1)
+```
+
+
+```{r}
+hier_reparam_fit_v3_breed <- hier_reparam_model_v3$sample(data=list(N=length(meta_traits_data_std$elab_id), 
+                                                        K=nlevels(meta_traits_data_std$breed_1),
+                                                        group=as.integer(meta_traits_data_std$breed_1),
+                                                        age = meta_traits_data_std$age_std,
+                                                        metabolite = meta_traits_data_std$N.Ac.Phenylalanine),
+                                  refresh=0, show_messages=FALSE)
+```
+
+# Shrinkage Plot
+
+```{r}
+# posterior mean
+post_means_v3 <- hier_reparam_fit_v3_breed_v2$summary() %>% 
+  select(variable, mean) %>% 
+  filter(grepl("^beta[01]\\[", variable))
+#mle_v3 <- coef(summary(lm(N.Ac.Phenylalanine ~ age_centered + size_at_DOC, data = meta_traits_data)))[2:3, 1]
+
+# MLE 
+grouped_data <- split(meta_traits_data_std, as.integer(meta_traits_data_std$breed_1))
+lm_output <- lapply(grouped_data, function(data) lm(Glycine ~ age_std, data = data))
+mle_coef_v3 <- lapply(lm_output, coef)
+mle_coef_v3 <- data.frame(do.call(rbind, mle_coef_v3)) # turn MLE list into a dataframe
+
+# data frame of PM and MLE of intercepts
+pm_mle_b1 <- data.frame(
+  breed = c(1:133),
+  mle_b1 = mle_coef_v3$age_std,
+  pm_b1 = (post_means_v3 %>% filter(grepl("^beta[1]\\[", variable)) %>% select(mean))
+)
+
+global_mean_b1 <- hier_reparam_fit_v3_breed_v2$summary() %>% 
+  select(variable, mean) %>% 
+  filter(grepl("^mu_beta1", variable))
+
+
+# plot
+shrinkage_plot(pm_mle_b1$mle_b1, pm_mle_b1$mean, shrink_point=global_mean_b1$mean)
+```
+```{r}
+pm_mle_b1
+```
+
+
+```{r}
+data.frame(table(meta_traits_data_std$size_at_DOC))
+```
+
+
+# Confidence Interval
+
+```{r}
+breed_sum <- hier_reparam_fit_v3_breed$summary()
+
+breed_sum$not_intersecting_0 <- !((breed_sum$q5 <= 0) & (breed_sum$q95 >= 0)) 
+breed_v1 <- breed_sum %>% 
+  filter(grepl("^beta[1]\\[", variable)) %>% 
+  ggplot(aes(y=reorder(variable, mean), x=mean, xmin=q5, xmax=q95)) +
+  geom_pointinterval() +
+  ggtitle(label="95% C.I. of N.Ac.Phenylalanine in Different Breeds") +
+  ylab("Slope of Different Breeds") +
+  xlab("Metabolite Abundance") +
+  scale_x_continuous(limit=c(-0.25, 0.8))
+  # theme(axis.text.y = element_text(vjust = 10))           
+breed_v1
+```
+# Try Another Metabolite
+
+```{r}
+hier_reparam_fit_v3_breed_v2 <- hier_reparam_model_v3$sample(data=list(N=length(meta_traits_data_std$elab_id), 
+                                                        K=nlevels(meta_traits_data_std$breed_1),
+                                                        group=as.integer(meta_traits_data_std$breed_1),
+                                                        age = meta_traits_data_std$age_std,
+                                                        metabolite = meta_traits_data_std$Glycine),
+                                  refresh=0, show_messages=FALSE)
+```
+
+```{r}
+breed_sum_v2 <- hier_reparam_fit_v3_breed_v2$summary()
+
+breed_sum_v2$not_intersecting_0 <- !((breed_sum_v2$q5 <= 0) & (breed_sum_v2$q95 >= 0)) 
+breed_v2 <- breed_sum_v2 %>% 
+  filter(grepl("^beta[1]\\[", variable)) %>% 
+  ggplot(aes(y=reorder(variable, mean), x=mean, xmin=q5, xmax=q95)) +
+  geom_pointinterval() +
+  ggtitle(label="95% C.I. of Glycine in Different Breeds") +
+  ylab("Slope of Different Breeds") +
+  xlab("Metabolite Abundance") +
+  scale_x_continuous(limit=c(-0.8, 0.25))
+  # theme(axis.text.y = element_text(vjust = 10))           
+breed_v2
+```
+

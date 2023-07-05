@@ -1,0 +1,100 @@
+---
+title: "5-pca"
+output: html_document
+date: "2023-05-21"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(Matrix)
+```
+
+```{r}
+pca_data <- meta_traits_data_std %>% select(X1.Methyladenosine:Xanthine) %>%  princomp
+tib <- tibble(pc1 = pca_data$scores[, 2], pc2 = pca_data$scores[, 3], age=meta_traits_data_std$age,
+       size=meta_traits_data_std$size_at_DOC, sex=meta_traits_data_std$sex) 
+
+tib %>% filter(age < 10) %>%  ggplot() + geom_point(aes(x=pc1, y=pc2, col=age)) + scale_color_viridis_b()
+plot(tib$age, tib$pc1)
+lm(pc1 ~ age + sex + size, data=tib %>% filter(age < 10)) %>% summary
+```
+
+```{r}
+hc <- meta_traits_data_std %>% select(X1.Methyladenosine:Xanthine) %>% t %>% dist %>% hclust
+
+cormat <- meta_traits_data_std %>% select(X1.Methyladenosine:Xanthine) %>% cor 
+Matrix(cormat[hc$order, hc$order]) %>% image
+
+nms <- meta_traits_data_std %>% select(X1.Methyladenosine:Xanthine) %>% colnames
+head(nms[hc$order])
+
+cor(meta_traits_data_std$Linolenic.Acid, meta_traits_data_std$Linoleic.Acid)
+# Difference btwn highly correlated metabolites
+# Looking at linear combo of these metabolites (together could be most predictive)
+# multivariate analysis 
+# run model on pc1, 2, 3, etc to see patterns
+```
+
+# Test
+
+```{r}
+priorString <- "normal"
+hyperparam1 <- 0
+hyperparam2 <- 1
+
+modelCode <- paste("
+      data {
+        int<lower=0> N; 
+        int<lower=1> K; 
+        int<lower=1, upper=K> group[N];
+        vector[N] age;
+        vector[N] metabolite; 
+      }
+      parameters {
+        real mu_beta0; 
+        real mu_beta1; 
+        real<lower=0> sigma_beta0; 
+        real<lower=0> sigma_beta1; 
+  
+        real<lower=0> sigma; 
+        vector[K] beta0_raw; 
+        vector[K] beta1_raw;
+      }
+      
+      transformed parameters {
+  
+        vector[K] beta0;
+        vector[K] beta1;
+  
+        for (i in 1:K) {
+          beta0[i] = mu_beta0 + sigma_beta0 * beta0_raw[i];
+          beta1[i] = mu_beta1 + sigma_beta1 * beta1_raw[i];
+        }
+      }     
+      
+      model {
+        mu_beta0 ~ ", priorString, "(", hyperparam1, ", ", hyperparam2, ");
+        mu_beta1 ~ ", priorString, "(", hyperparam1, ", ", hyperparam2, ");
+        sigma_beta0 ~ cauchy(0, 1);
+        sigma_beta1 ~ cauchy(0, 1);
+        
+        for (i in 1:K) {
+          beta0_raw[i] ~ std_normal();
+          beta1_raw[i] ~ std_normal();
+        }
+  
+        for (n in 1:N) {
+          metabolite[n] ~ normal(beta0[group[n]] + beta1[group[n]] * age[n], sigma);
+        }
+      }
+    ")
+```
+
+```{r}
+print(modelCode)
+```
+
+

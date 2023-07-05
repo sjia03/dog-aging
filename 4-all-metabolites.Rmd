@@ -1,0 +1,401 @@
+---
+title: "4-all-metabolites"
+output: html_document
+date: "2023-05-14"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+meta_traits_data_std
+```
+
+```{r}
+meta <- "X1.3.Methylhistidine"
+# meta_traits_data_std[, meta] 
+# colnames(meta_traits_data_std)
+metas <- c(colnames(metabolites_data_t_std[, 2:ncol(metabolites_data_t_std)]))
+```
+
+```{r}
+# Need to be CAREFUL of naming in metas (make sure exact name exists)
+extract_beta1 <- function(df, metas, stan_model) {
+  # Create empty data frame to store values
+  beta1_df <- data.frame(
+    metabolite = character(),
+    type = numeric(),
+    beta1 = numeric(),
+    stringsAsFactors=F
+  )
+  
+  for (meta in metas) {
+    # Fit stan model on data
+    stan_fit <- stan_model$sample(data=list(N=length(df$elab_id), 
+                                                        K=nlevels(df$size_at_DOC),
+                                                        group=as.integer(df$size_at_DOC),
+                                                        age = df$age_std,
+                                                        metabolite = df[, meta]),
+                                  refresh=0, show_messages=FALSE)
+    
+    # Find beta1 values for all 5 groups
+    meta_beta1 <- stan_fit$summary() %>% 
+      filter(grepl("^beta[1]\\[", variable))
+    
+    # if age and meta is scaled, beta0 should be 1
+    
+    # Add information to dataframe
+    for (i in 1:nrow(meta_beta1)) {
+      row <- meta_beta1[i,]
+      # return (row)
+      # names(row) <- names(beta1_df) # preserve column names
+      meta_row <- c(meta, row$variable, row$mean) # create new row
+      # print (meta_row)
+      beta1_df[nrow(beta1_df)+1,] <- meta_row
+      # beta1_df <- rbind(beta1_df, meta_row) # add to df
+    }
+  }
+  return (beta1_df)
+}
+```
+
+```{r}
+# Split by positive and negative!!!
+meta_temp <- c('N.Ac.Phenylalanine', 'N.Ac.Tryptophan', 'Acetylcarnitine', 'Glycine', 'Deoxycarnitine', 'X4.Guanidinobutanoate')
+# meta_temp <- c('N.Ac.Phenylalanine', 'N.Ac.Tryptophan')
+beta1_df <- extract_beta1(meta_traits_data_std, meta_temp, hier_reparam_model_v3)
+head(beta1_df)
+```
+
+# Functions
+
+```{r}
+plot_beta1 <- function(beta1_df) {
+  ggplot(beta1_df, aes(x=type, y=beta1, color=metabolite)) +
+    geom_line(aes(group=metabolite)) +
+    theme(legend.position="none") +
+    geom_hline(yintercept=0, linetype='dashed') +
+    scale_y_continuous(limits = c(-0.4, 0.4)) 
+}
+```
+
+# Test on Original Model
+
+## Positively Correlated
+
+```{r}
+# Find all positive correlated metabolites
+pos_meta <- which(age_diff$est > 0) # age_diff is all metas w/ significant relationship between age and meta
+pos_meta_names <- age_diff[pos_meta, ]$Met
+
+# Calculate beta1
+pos_beta1_df <- extract_beta1(meta_traits_data_std, pos_meta_names, hier_reparam_model_v3)
+```
+
+```{r}
+age_diff
+```
+
+## Signifcance by Group
+
+```{r}
+toy_size <- meta_traits_data_std %>% filter(size_at_DOC == "Toy")
+standard_size <- meta_traits_data_std %>% filter(size_at_DOC == "Standard")
+medium_size <- meta_traits_data_std %>% filter(size_at_DOC == "Medium")
+large_size <- meta_traits_data_std %>% filter(size_at_DOC == "Large")
+giant_size <- meta_traits_data_std %>% filter(size_at_DOC == "Giant")
+
+test_age_significance <- function(df) {
+  model <- lm(metabolite_abundance ~ age, data = df)
+  p_value <- summary(model)$coefficients[2, "Pr(>|t|)"]
+  return(p_value < 0.05)
+}
+
+toy_significant <- sapply(split(toy_size, toy_size$metabolite_abundance), test_age_significance)
+
+```
+
+
+```{r}
+pos_beta1_df$type <- as.factor(pos_beta1_df$type)
+pos_beta1_df$beta1 <- as.numeric(pos_beta1_df$beta1)
+pos_bayes <- plot_beta1(pos_beta1_df) 
+pos_bayes_int <- ggplotly(pos_bayes, tooltip=c("type", "beta1", "metabolite"))
+```
+
+Group 2 dipping is somewhat evident here.
+
+```{r}
+# Take all metas in this list, calculate the slopes of each size group and plot it
+get_freq_slopes <- function(metas, data) {
+  
+  beta1_df <- data.frame(
+    metabolite = character(),
+    type = numeric(),
+    beta1 = numeric(),
+    stringsAsFactors=F
+  )
+  
+  for (meta in metas) {
+    # Calculate slope for each size group
+    for (size in levels(data$size_at_DOC)) {
+      size_data <- data %>% filter(size_at_DOC==size)
+      slope <- summary(lm(size_data[, meta]~size_data$age))$coefficients[2]
+      # add row
+      meta_row <- c(meta, size, numeric(slope)) # create new row
+      beta1_df[nrow(beta1_df)+1,] <- meta_row
+    }
+  }
+  return (beta1_df)
+}
+```
+
+```{r}
+size_data_test <- meta_traits_data_std %>% filter(size_at_DOC=="Giant")
+test_sum <- summary(lm(size_data_test[, "X3HBA"]~size_data_test$age))
+test_sum
+```
+
+
+```{r, fig.height=5, fig.width=15}
+pos_freq_df <- get_freq_slopes(pos_meta_names, meta_traits_data_std)
+pos_freq_df$beta1 <- as.numeric(pos_freq_df$beta1)
+pos_freq <- plot_beta1(pos_freq_df)
+
+grid.arrange(pos_freq + ggtitle("Frequentist: Slopes of Significant Positively Correlated Metabolites"), pos_bayes + ggtitle("Bayes: Slopes of Significant Positively Correlated Metabolites"), nrow = 1)
+```
+
+```{r}
+pos_freq_df
+```
+
+
+```{r}
+# pos_bayes_int
+meta_traits_data_std$n.Formylmethionine
+```
+
+
+## Negatively Correlated
+
+```{r}
+# Find all negatively correlated metabolites
+neg_meta <- which(age_diff$est < 0) # age_diff is all metas w/ significant relationship between age and meta
+neg_meta_names <- age_diff[neg_meta, ]$Met
+
+# Calculate beta1
+neg_beta1_df <- extract_beta1(meta_traits_data_std,neg_meta_names,hier_reparam_model_v3)
+```
+
+```{r, fig.height=5, fig.width=15}
+neg_beta1_df$type <- as.factor(neg_beta1_df$type)
+neg_beta1_df$beta1 <- as.numeric(neg_beta1_df$beta1)
+neg_bayes <- plot_beta1(neg_beta1_df)
+neg_bayes_int <- ggplotly(neg_bayes, tooltip=c("type", "beta1", "metabolite"))
+
+neg_freq_df <- get_freq_slopes(neg_meta_names, meta_traits_data_std)
+neg_freq_df$beta1 <- as.numeric(neg_freq_df$beta1)
+neg_freq <- plot_beta1(neg_freq_df)
+grid.arrange(neg_freq + ggtitle("Frequentist: Slopes of Significant Negatively Correlated Metabolites"), neg_bayes + ggtitle("Bayes: Slopes of Significant Negatively Correlated Metabolites"), nrow = 1)
+```
+
+Can see a very subtle pattern which goes against the hypothesis (smaller dogs would be less intense beta).
+
+# Change Prior on Shrinkage Variance
+
+```{r}
+hier_reparam_model_v3.1 <- cmdstan_model("stan-models/hlm_metabolite_reparam_v3.1.stan")
+```
+
+
+```{r}
+# check model
+hier_reparam_fit_v3.1 <- hier_reparam_model_v3.1$sample(data=list(N=length(meta_traits_data_std$elab_id), 
+                                                        K=nlevels(meta_traits_data_std$size_at_DOC),
+                                                        group=as.integer(meta_traits_data_std$size_at_DOC),
+                                                        age = meta_traits_data_std$age_std,
+                                                        metabolite = meta_traits_data_std$N.Ac.Phenylalanine),
+                                  refresh=0, show_messages=FALSE)
+
+hier_reparam_fit_v3.1$summary() %>% 
+  filter(grepl("^beta[1]\\[", variable)) %>% 
+  ggplot(aes(y=variable, x=mean, xmin=q5, xmax=q95)) +
+  geom_pointinterval() 
+```
+
+
+```{r}
+pos_beta1_df3 <- extract_beta1(meta_traits_data_std, pos_meta_names, hier_reparam_model_v3.1)
+```
+
+```{r}
+pos_beta1_df3$type <- as.factor(pos_beta1_df3$type)
+pos_beta1_df3$beta1 <- as.numeric(pos_beta1_df3$beta1)
+pos_bayes3 <- plot_beta1(pos_beta1_df3) 
+pos_bayes_int3 <- ggplotly(pos_bayes3, tooltip=c("type", "beta1", "metabolite"))
+pos_bayes3
+```
+
+## Shrink Variance More
+
+```{r}
+hier_reparam_model_v3.2 <- cmdstan_model("stan-models/hlm_metabolite_reparam_v3.2.stan")
+
+# check model
+hier_reparam_fit_v3.2 <- hier_reparam_model_v3.2$sample(data=list(N=length(meta_traits_data_std$elab_id), 
+                                                        K=nlevels(meta_traits_data_std$size_at_DOC),
+                                                        group=as.integer(meta_traits_data_std$size_at_DOC),
+                                                        age = meta_traits_data_std$age_std,
+                                                        metabolite = meta_traits_data_std$N.Ac.Phenylalanine),
+                                  refresh=0, show_messages=FALSE)
+
+hier_reparam_fit_v3.2$summary() %>% 
+  filter(grepl("^beta[1]\\[", variable)) %>% 
+  ggplot(aes(y=variable, x=mean, xmin=q5, xmax=q95)) +
+  geom_pointinterval() 
+```
+
+```{r}
+hier_reparam_model_v3.3 <- cmdstan_model("stan-models/hlm_meta_reparam_v3.3.stan")
+
+# check model
+hier_reparam_fit_v3.3 <- hier_reparam_model_v3.3$sample(data=list(N=length(meta_traits_data_std$elab_id), 
+                                                        K=nlevels(meta_traits_data_std$size_at_DOC),
+                                                        group=as.integer(meta_traits_data_std$size_at_DOC),
+                                                        age = meta_traits_data_std$age_std,
+                                                        metabolite = meta_traits_data_std$N.Ac.Phenylalanine),
+                                  refresh=0, show_messages=FALSE)
+
+hier_reparam_fit_v3.3$summary() %>% 
+  filter(grepl("^beta[1]\\[", variable)) %>% 
+  ggplot(aes(y=variable, x=mean, xmin=q5, xmax=q95)) +
+  geom_pointinterval() 
+```
+
+```{r}
+pos_beta1_df3.3 <- extract_beta1(meta_traits_data_std, pos_meta_names, hier_reparam_model_v3.3)
+
+pos_beta1_df3.3$type <- as.factor(pos_beta1_df3.3$type)
+pos_beta1_df3.3$beta1 <- as.numeric(pos_beta1_df3.3$beta1)
+pos_bayes3.3 <- plot_beta1(pos_beta1_df3.3) 
+#pos_bayes_int3.3 <- ggplotly(pos_bayes3.2, tooltip=c("type", "beta1", "metabolite"))
+pos_bayes3.3
+```
+
+
+```{r}
+pos_beta1_df3.2 <- extract_beta1(meta_traits_data_std, pos_meta_names, hier_reparam_model_v3.2)
+
+pos_beta1_df3.2$type <- as.factor(pos_beta1_df3.2$type)
+pos_beta1_df3.2$beta1 <- as.numeric(pos_beta1_df3.2$beta1)
+pos_bayes3.2 <- plot_beta1(pos_beta1_df3.2)
+
+pos_bayes_int3.2 <- ggplotly(pos_bayes3.2, tooltip=c("type", "beta1", "metabolite"))
+pos_bayes3.2
+```
+
+```{r}
+pos_bayes3 <- plot_beta1(pos_beta1_df3) 
+pos_bayes3 <- plot_beta1(pos_beta1_df3) 
+pos_bayes3.2 <- plot_beta1(pos_beta1_df3.2)
+pos_bayes3.3 <- plot_beta1(pos_beta1_df3.3) 
+```
+
+
+
+```{r, fig.width=25, fig.height=5}
+grid.arrange(pos_bayes3.3 + ggtitle("Bayes (Shrink Cauchy(0,10))"), pos_bayes + ggtitle("Bayes (Shrink Cauchy(0,1))"), pos_bayes3 + ggtitle("Bayes (Shrink N(0,0.1))"), pos_bayes3.2 + ggtitle("Bayes (Shrink N(0,0.01))"), nrow = 1) 
+# shrink more towards beta1 global mean = slope of other sizes (shrinkage is seen in horizontal line)
+# giant has small n so it's now closer to the slopes of the other groups 
+```
+
+```{r}
+neg_beta1_df3 <- extract_beta1(meta_traits_data_std, neg_meta_names, hier_reparam_model_v3.1)
+neg_beta1_df3.2 <- extract_beta1(meta_traits_data_std, neg_meta_names, hier_reparam_model_v3.2)
+
+neg_beta1_df3$type <- as.factor(neg_beta1_df3$type)
+neg_beta1_df3$beta1 <- as.numeric(neg_beta1_df3$beta1)
+neg_bayes3 <- plot_beta1(neg_beta1_df3) 
+
+neg_beta1_df3.2$type <- as.factor(neg_beta1_df3.2$type)
+neg_beta1_df3.2$beta1 <- as.numeric(neg_beta1_df3.2$beta1)
+neg_bayes3.2 <- plot_beta1(neg_beta1_df3.2) 
+```
+
+```{r, fig.width=25, fig.height=5}
+grid.arrange(neg_freq + ggtitle("Frequentist: Slopes of Significant Negatively Correlated Metabolites"), neg_bayes + ggtitle("Bayes (Shrink Cauchy(0,1)): Slopes of Significant Negatively Correlated Metabolites"), neg_bayes3 + ggtitle("Bayes (Shrink N(0,0.1)): Slopes of Significant Negatively Correlated Metabolites"), neg_bayes3.2 + ggtitle("Bayes (Shrink N(0,0.01)): Slopes of Significant Negatively Correlated Metabolites"), nrow = 1) 
+```
+
+
+
+# Test on Model with Inputs for Age, Sex, and Sterlilization
+
+Rewrite `extract_beta` to match new model
+
+```{r}
+# Need to be CAREFUL of naming in metas (make sure exact name exists)
+extract_beta1_v2 <- function(df, metas, stan_model) {
+  # Create empty data frame to store values
+  beta1_df <- data.frame(
+    metabolite = character(),
+    type = numeric(),
+    beta1 = numeric(),
+    stringsAsFactors=F
+  )
+  
+  for (meta in metas) {
+    # Fit stan model on data
+    stan_fit <- stan_model$sample(data=list(N=length(df$elab_id), 
+                                                        K=nlevels(df$size_at_DOC),
+                                                        group=as.integer(df$size_at_DOC),
+                                                        age = df$age_std,
+                                                        sex = df$sex,
+                                                        sterilization = df$sterilization_status,
+                                                        metabolite = df[, meta]),
+                                  refresh=0, show_messages=FALSE)
+    
+    # Find beta1 values for all 5 groups
+    meta_beta1 <- stan_fit$summary() %>% 
+      filter(grepl("^beta[1]\\[", variable))
+    
+    # Add information to dataframe
+    for (i in 1:nrow(meta_beta1)) {
+      row <- meta_beta1[i,]
+      # names(row) <- names(beta1_df) # preserve column names
+      meta_row <- c(meta, row$variable, row$mean) # create new row
+      beta1_df[nrow(beta1_df)+1,] <- meta_row
+      # beta1_df <- rbind(beta1_df, meta_row) # add to df
+    }
+  }
+  return (beta1_df)
+}
+```
+
+
+## Positively Correlated
+
+```{r}
+# Calculate beta1
+pos_beta1_df2 <- extract_beta1_v2(meta_traits_data_std, pos_meta_names,hier_reparam_model_v5)
+pos_beta1_df2$type <- as.factor(pos_beta1_df2$type)
+pos_beta1_df2$beta1 <- as.numeric(pos_beta1_df2$beta1)
+```
+
+```{r}
+plot_beta1(pos_beta1_df2)
+plot_beta1(pos_beta1_df)
+```
+
+## Negatively Correlated
+
+```{r}
+neg_beta1_df2 <- extract_beta1_v2(meta_traits_data_std,neg_meta_names,hier_reparam_model_v5)
+```
+
+```{r}
+neg_beta1_df2$type <- as.factor(neg_beta1_df2$type)
+neg_beta1_df2$beta1 <- as.numeric(neg_beta1_df2$beta1)
+plot_beta1(neg_beta1_df2)
+```
+

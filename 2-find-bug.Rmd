@@ -1,0 +1,62 @@
+---
+title: "2-error-check"
+output: html_document
+date: "2023-05-04"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Manual Correlation Check
+
+```{r}
+test_df <- meta_traits_data[,c("N.Ac.Phenylalanine", "size_at_DOC")]
+df_list <- split(test_df, test_df$size_at_DOC)
+df_list
+```
+
+```{r}
+draws_v3
+```
+
+```{r}
+cor(draws_v3$`beta1_raw[1]`, draws_v3$`beta1_raw[2]`)
+length(draws_v3$`beta1_raw[1]`)
+```
+
+## Run Other Metabolites
+
+```{r}
+# meta_traits_data$Acetylcarnitine
+
+hier_reparam_fit_v3_acetyl <- hier_reparam_model$sample(data=list(N=length(meta_traits_data$elab_id), 
+                                                        K=nlevels(meta_traits_data$size_at_DOC),
+                                                        group=as.integer(meta_traits_data$size_at_DOC),
+                                                        age = meta_traits_data$age_centered,
+                                                        metabolite = meta_traits_data$Acetylcarnitine),
+                                  refresh=0, show_messages=FALSE)
+```
+Shows perfect correlation for the same beta's...
+
+```{r}
+hier_reparam_fit_v3_glycerol <- hier_reparam_model$sample(data=list(N=length(meta_traits_data$elab_id), 
+                                                        K=nlevels(meta_traits_data$size_at_DOC),
+                                                        group=as.integer(meta_traits_data$size_at_DOC),
+                                                        age = meta_traits_data$age_centered,
+                                                        metabolite = meta_traits_data$Glycerol.3.P),
+                                  refresh=0, show_messages=FALSE)
+```
+
+## Check sigma_beta1?
+
+```{r}
+#source("plot.roots.R")
+polyroot(c(1,0,0,-0.5))
+#plot.roots(NULL,polyroot(c(1,2,0.9)), main="roots of ma part")
+```
+
+```{r}
+sqrt(-0.5^2+0.9279607^2)
+```
+

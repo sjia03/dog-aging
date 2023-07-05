@@ -1,0 +1,79 @@
+---
+title: "6-vary-shrinkage-prior"
+output: html_document
+date: "2023-05-29"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Functions
+
+```{r}
+plot_shrinkage <- function(data, metabolite, summary) {
+    
+    # Calculate posterior mean
+    post_means_v3 <- summary %>% 
+      select(variable, summary.mean) %>% 
+      filter(grepl("^beta[01]\\[", variable))
+    
+    # MLE 
+    grouped_data <- split(data, as.integer(data$size_at_DOC))
+    lm_output <- lapply(grouped_data, function(data) lm(metabolite ~ age_std, data = data))
+    mle_coef_v3 <- lapply(lm_output, coef)
+    mle_coef_v3 <- data.frame(do.call(rbind, mle_coef_v3)) # turn MLE list into a dataframe
+    
+    # data frame of PM and MLE of intercepts
+    pm_mle_b1 <- data.frame(
+      size = c(1:5),
+      mle_b1 = mle_coef_v3$age_std,
+      pm_b1 = (post_means_v3 %>% filter(grepl("^beta[1]\\[", variable)) %>% select(summary.mean))
+    )
+    
+    global_mean_b1 <- summary %>% 
+      select(variable, summary.mean) %>% 
+      filter(grepl("^mu_beta1", variable))
+    
+    empirical=pm_mle_b1$mle_b1
+    posterior_mean=pm_mle_b1$summary.mean
+    shrink_point = global_mean_b1$summary.mean
+    
+    plot <- tibble(y=empirical, pm=posterior_mean) %>%
+      ggplot() +
+      geom_segment(aes(x=y, xend=pm, y=1, yend=0), linetype="dashed") +
+      geom_point(aes(x=y, y=1)) +
+      geom_point(aes(x=pm, y=0)) +
+      theme_bw(base_size=16) +
+      geom_vline(xintercept=shrink_point, color="blue", size=1.2) +
+      ylab("") + xlab("Estimate") +
+      scale_y_continuous(breaks=c(0, 1),
+                         labels=c("Posterior Mean", "MLE"),
+                         limits=c(0,1))
+    
+    return (plot)
+  }
+```
+
+
+# Original Cauchy(0, 1)
+
+```{r}
+shrinkage_plot(pm_mle_b1$mle_b1, pm_mle_b1$mean, shrink_point=global_mean_b1$mean)
+```
+```{r}
+hier_reparam_fit_v3.1_std <- stan(file="stan-models/hlm_metabolite_reparam_v3.1.stan",
+                                 data=list(N=length(meta_traits_data_std$elab_id),
+                                           K=nlevels(meta_traits_data_std$size_at_DOC),
+                                           group=as.integer(meta_traits_data_std$size_at_DOC),
+                                           age = meta_traits_data_std$age_std,
+                                           metabolite = meta_traits_data_std$N.Ac.Phenylalanine))
+```
+
+```{r}
+summary_df <- as.data.frame(summary(hier_reparam_fit_v3.1_std), reset_index=FALSE)
+summary_df <- summary_df %>% rownames_to_column(var = "variable")
+
+shrinkage_plot(meta_traits_data_std, "N.Ac.Phenylalanine", summary_df)
+```
+

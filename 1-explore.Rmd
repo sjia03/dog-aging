@@ -1,0 +1,372 @@
+---
+title: "1-explore"
+output: html_document
+date: "2023-04-16"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Load packages
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(readxl)
+library(broom)
+library(ggridges)
+library(cmdstanr)
+library(rstan)
+library(bayesplot)
+library(shinystan)
+library(tidybayes)
+library(plotly)
+library(gridExtra)
+library(ggVennDiagram)
+```
+
+
+# Load and Tidy Data
+
+```{r}
+# Load data
+metabolites_data <- data.frame(`All-Batches-EffectsRemoved4`)
+head(metabolites_data)
+# Tidy column names
+metabolites_data <- metabolites_data %>% rename_with(~gsub("^X", "", .), starts_with("X"))
+# Transpose data
+metabolites_data_t <- data.frame(t(metabolites_data)) %>% 
+  rownames_to_column(var="elab_id") %>% 
+  mutate(elab_id=as.integer(elab_id))
+head(metabolites_data_t)
+```
+
+```{r}
+# Load basic dog info data
+dog_info <- read.csv("data/sampleinfo.csv")
+#head(dog_info)
+
+# Sample info codebook
+sample_info <- read_excel("sampleinfo_codebook.xlsx")
+# dog_info[,c("elab_id", "elab_idX")]
+
+# Map data
+meta_age_data <- merge(dog_info[, c('elab_id', 'age', 'size_at_DOC')], metabolites_data_t, by='elab_id', all.x=TRUE)
+```
+
+# Explore Data
+## Metabolites vs age
+
+```{r}
+# Turn into long data
+long_meta_age_data <- meta_age_data %>% 
+  gather(key="Metabolite", value="Abundance", -elab_id, -age, -size_at_DOC) 
+```
+
+```{r}
+
+fit_lm <- function(df, type="lm", predictors) {
+  form <- as.formula(paste("Abundance", paste(predictors, collapse=" + "), sep=" ~ "))
+  
+  if(sum(is.na(df$Abundance))>50) # sum of missing values
+    return (NULL)
+  else {
+    if(type=='lm')
+      return(lm(form, data=df))
+    else if(type=='rq') # why quantile regression?
+      return(rq(form, data=df, tau=0.5))
+  }
+}
+
+age_diff <- long_meta_age_data %>% dplyr::select(-(1)) %>%
+  group_by(Metabolite) %>% 
+  do(lmres=fit_lm(., predictors=c("age"))) %>% 
+  summarize(Met=Metabolite,
+            est=summary(lmres)$coefficients["age",1],
+            pval=summary(lmres)$coefficients["age", 4]) %>% 
+  filter(pval<0.05) %>% 
+  arrange(abs(pval))
+age_diff
+# 137 metabolites to 92 sig ones
+
+mets <- age_diff$Met[1:16] # top 16 most related to age
+long_meta_age_data %>% filter(Metabolite %in% mets) %>% 
+  ggplot(aes(x=age, y=Abundance)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE, fullrange = TRUE) +
+  facet_wrap(~ Metabolite, nrow=4, scales='free')
+```
+
+```{r}
+
+
+age_diff_v2 <- long_meta_age_data %>% dplyr::select(-(1)) %>%
+  group_by(Metabolite, size_at_DOC) %>% 
+  do(lmres=fit_lm(., predictors=c("age"))) %>% 
+  summarize(Met=Metabolite,
+            size = size_at_DOC,
+            est=summary(lmres)$coefficients["age",1],
+            pval=summary(lmres)$coefficients["age", 4]) %>% 
+  filter(pval<0.05) %>% 
+  arrange(abs(pval))
+age_diff_v2
+```
+
+```{r, fig.width=10, fig.height=8}
+sig_counts <- table(age_diff_v2$size)
+metabolite_lists <- split(age_diff_v2$Met, age_diff_v2$size)
+common_metabolites <- Reduce(intersect, metabolite_lists)
+
+ggVennDiagram(metabolite_lists) +
+  ggplot2::scale_fill_gradient(low="skyblue",high = "darkblue")
+  
+```
+
+
+# Bayes Linear Regression
+
+```{r}
+# meta_age_data$N.Ac.Phenylalanine
+# prior.pred.fit <- rstan::sampling()
+model <- rstan::stan_model("one_metabolite.stan")
+
+# Prior predictive
+prior.pred.fit <- rstan::sampling(object=model,
+                            data=list(n=length(meta_age_data$elab_id), 
+                                   metabolite = meta_age_data$N.Ac.Phenylalanine,
+                                   age = meta_age_data$age,
+                                   mu0=0,
+                                   sigma20=0.5^2,
+                                   mu1=0,
+                                   sigma21=0.5^2,
+                                   kappa0=0.5,
+                                   theta0=0.5), show_messages = FALSE)
+
+```
+
+```{r}
+bayesplot::color_scheme_set("blue")
+priorpred_reasonable <- bayesplot::ppc_stat_2d(y=meta_age_data$N.Ac.Phenylalanine, yrep=rstan::extract(prior.pred.fit, pars='metabolite_sim')$metabolite_sim) 
+priorpred_reasonable
+```
+
+```{r}
+meta_stan <- cmdstan_model("one_metabolite.stan")
+meta_stan_fit <- meta_stan$sample(data=list(n=length(meta_age_data$elab_id), 
+                                   metabolite = meta_age_data$N.Ac.Phenylalanine,
+                                   age = meta_age_data$age,
+                                   mu0=0,
+                                   sigma20=0.5^2,
+                                   mu1=0,
+                                   sigma21=0.5^2,
+                                   kappa0=0.5,
+                                   theta0=0.5), refresh=0, show_messages=FALSE)
+samples_meta <- meta_stan_fit$draws(format="df")
+```
+```{r}
+samples_meta
+```
+Check if posterior predictive matches the data?
+
+```{r}
+# visualize Nac.Pheny lm (not that linear?)
+ggplot(meta_age_data, aes(x=age, y=N.Ac.Phenylalanine)) +
+  geom_smooth(method="lm") +
+  geom_point()
+
+# simulate data based on highest log prob
+beta0 <- -0.105374
+beta1 <- 0.00385459
+sigma <- sqrt(0.00207080)
+one_simulation <- meta_age_data %>% 
+  mutate(mu=beta0+beta1*age, 
+         simulated_NAc.Pheny=rnorm(726, mean=mu, sd=sigma)) %>% 
+  select(age, N.Ac.Phenylalanine, simulated_NAc.Pheny)
+one_simulation
+
+# visualize one with highest log prob
+ggplot(one_simulation, aes(x=simulated_NAc.Pheny)) +
+  geom_density(color="lightblue") +
+  geom_density(aes(x=N.Ac.Phenylalanine), color="darkblue")
+
+# pp_check(meta_stan, nreps=50)
+```
+# Bayes Hierarchical Linear Regression
+
+- Breed is a bunch of numbers
+
+Use size as hierarchy
+
+```{r}
+sort(table(meta_traits_data$breed_1))
+```
+
+```{r}
+# Factorize data
+meta_traits_data$size_at_DOC <- as.factor(meta_traits_data$size_at_DOC)
+nlevels(meta_traits_data$size_at_DOC)
+
+# Center age data
+meta_traits_data <- meta_traits_data %>% 
+  mutate(age_centered = age - mean(age, na.rm = TRUE))
+
+meta_traits_data_std$age_centered
+# Standardize metabolite data
+```
+
+```{r}
+# Create model
+hier_model <- cmdstan_model("hierarchical_metabolite.stan")
+
+hier_fit <- hier_model$sample(data=list(N=length(meta_traits_data$elab_id), 
+                                        K=nlevels(meta_traits_data$size_at_DOC),
+                                        group=as.integer(meta_traits_data$size_at_DOC),
+                                        age = meta_traits_data$age_centered,
+                                        metabolite = meta_traits_data$N.Ac.Phenylalanine),
+                              refresh=0, show_messages=FALSE)
+```
+
+ ## Reparametrize
+
+```{r}
+hier_reparam_model <- cmdstan_model("hlm_metabolite_reparam_v2.stan")
+
+hier_reparam_fit <- hier_reparam_model$sample(data=list(N=length(meta_traits_data$elab_id), 
+                                                        K=nlevels(meta_traits_data$size_at_DOC),
+                                                        group=as.integer(meta_traits_data$size_at_DOC),
+                                                        age = meta_traits_data$age_centered,
+                                                        metabolite = meta_traits_data$N.Ac.Phenylalanine),
+                                  refresh=0, show_messages=FALSE)
+```
+
+```{r}
+hier_reparam_model_v3 <- cmdstan_model("hlm_metabolite_reparam_v3.stan")
+
+hier_reparam_fit_v3 <- hier_reparam_model_v3$sample(data=list(N=length(meta_traits_data$elab_id), 
+                                                        K=nlevels(meta_traits_data$size_at_DOC),
+                                                        group=as.integer(meta_traits_data$size_at_DOC),
+                                                        age = meta_traits_data$age_centered,
+                                                        metabolite = meta_traits_data$N.Ac.Phenylalanine),
+                                  refresh=0, show_messages=FALSE)
+
+table(as.integer(meta_traits_data$size_at_DOC))
+
+```
+
+## Diagnostics 
+
+### Posterior Interval
+```{r}
+hier_reparam_fit_v3$summary() %>% 
+  filter(grepl("^beta[1]\\[", variable)) %>% 
+  ggplot(aes(y=variable, x=mean, xmin=q5, xmax=q95)) +
+  geom_pointinterval() 
+```
+```{r}
+hier_reparam_fit_v3$draws() %>% 
+  spread_draws(beta1[k]) %>% 
+  filter(k%in%c(1,5)) %>% # pivot and mutate (plot the difference)
+  ggplot() +
+  geom_histogram(aes(x=beta1, fill=as.factor(k)))
+# significance: does the post dist of the difference include 0?
+```
+
+
+### Shrinkage Plots
+
+```{r}
+# posterior mean
+post_means_v3 <- hier_reparam_fit_v3$summary() %>% 
+  select(variable, mean) %>% 
+  filter(grepl("^beta[01]\\[", variable))
+#mle_v3 <- coef(summary(lm(N.Ac.Phenylalanine ~ age_centered + size_at_DOC, data = meta_traits_data)))[2:3, 1]
+
+# MLE (ALL THE SAME VALUE RN...)
+grouped_data <- split(meta_traits_data, as.integer(meta_traits_data$size_at_DOC))
+lm_output <- lapply(grouped_data, function(data) lm(N.Ac.Phenylalanine ~ age_centered, data = data))
+mle_coef_v3 <- lapply(lm_output, coef)
+mle_coef_v3 <- data.frame(do.call(rbind, mle_coef_v3)) # turn MLE list into a dataframe
+
+# data frame of PM and MLE of intercepts
+pm_mle_b1 <- data.frame(
+  size = c(1:5),
+  mle_b1 = mle_coef_v3$age_centered,
+  pm_b1 = (post_means_v3 %>% filter(grepl("^beta[1]\\[", variable)) %>% select(mean))
+)
+
+library(reshape2)
+
+# create shrinkage plot
+ggplot(melt(pm_mle_b1, id.vars = "size"), aes(x = value, y = variable)) +
+  geom_point() +
+  theme_classic()
+  #facet_grid(variable ~ ., scales = "free_y")
+```
+
+```{r}
+shrinkage_plot <- function(empirical, posterior_mean,
+                           shrink_point=mean(posterior_mean)) {
+    tibble(y=empirical, pm=posterior_mean) %>%
+    ggplot() +
+    geom_segment(aes(x=y, xend=pm, y=1, yend=0), linetype="dashed") +
+    geom_point(aes(x=y, y=1)) +
+    geom_point(aes(x=pm, y=0)) +
+    theme_bw(base_size=16) +
+    geom_vline(xintercept=shrink_point, color="blue", size=1.2) + # instead of mean of PM, do mean of global 
+    ylab("") + xlab("Estimate") +
+    scale_y_continuous(breaks=c(0, 1),
+                       labels=c("Posterior Mean", "MLE"),
+                       limits=c(0,1))
+}
+# BEGIN SOLUTION
+shrinkage_plot(pm_mle_b1$mle_b1, pm_mle_b1$mean, shrink_point=)
+```
+```{r}
+table(meta_traits_data$size_at_DOC)
+```
+
+
+## Posterior Predictive
+
+```{r}
+obs <- meta_traits_data$N.Ac.Phenylalanine
+```
+
+
+
+```{r}
+draws_v3 <- as_tibble(hier_reparam_fit_v3$draws())
+colnames(draws_v3) <- gsub("^\\d+\\.", "", colnames(draws_v3))
+beta_cols <- grep("^beta[1]\\[", colnames(draws_v3))
+beta1_draws_v3 <- draws_v3[beta_cols]
+beta1_draws_v3
+#draws_v3 <- draws_v3 %>%
+  #mutate(group = paste("Group", hier_reparam_fit_v3$num_chains(), sep = "_"))
+#as.integer(meta_traits_data$size_at_DOC)
+```
+
+
+## Linear Reg vs Bayes
+
+# Correlation 
+
+```{r}
+# Check correlation
+cormat <- cor(meta_age_data %>% dplyr::select(-(1)), use="pairwise.complete.obs")
+covmat <- cov(meta_age_data %>% dplyr::select(-(1)), use="pairwise.complete.obs")
+# Find most correlated 
+cor_tri <- cormat * upper.tri(diag(nrow(cormat)))
+indices <- order(abs(cor_tri), decreasing=TRUE)
+cor_vec <- cor_tri[indices]
+row_idx <- indices %% nrow(cormat)
+col_idx <- floor(indices / nrow(cormat)) + 1
+
+length(row_idx)
+length(col_idx)
+length(cor_vec)
+head(names(cor_vec))
+length(rownames(cormat)[row_idx])
+head(cbind(rownames(cormat)[row_idx], rownames(cormat)[col_idx], cor_vec), n=20)
+```
+

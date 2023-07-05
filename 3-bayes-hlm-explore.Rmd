@@ -1,0 +1,508 @@
+---
+title: "3-bayes-hlm"
+output: html_document
+date: "2023-05-05"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+In this file I standardized the data, applied Bayes HLM to a few other metabolites individually, ran some posterior diagnostics, and applied (sterilization status x size) + (sex x size) as a group.
+
+l# Standardize Data
+
+```{r}
+# Standardize metabolite abundances
+metabolites_data_t_std <- data.frame(elab_id=metabolites_data_t$elab_id, scale(metabolites_data_t[,-1]))
+
+# Merge std data
+meta_traits_data_std <- merge(dog_info, metabolites_data_t_std, by='elab_id', all.x=TRUE)
+
+# Factorize data
+meta_traits_data_std$size_at_DOC <- as.factor(meta_traits_data_std$size_at_DOC)
+
+# Standardize age (scale is creating diff dimensions...)
+meta_traits_data_std$age_std <- scale(meta_traits_data_std$age)[,1]
+```
+
+# 1) Group by Size
+
+## Run CmdStan
+
+```{r}
+hier_reparam_model_v3 <- cmdstan_model("stan-models/hlm_metabolite_reparam_v3.stan")
+
+hier_reparam_fit_v3_std <- hier_reparam_model_v3$sample(data=list(N=length(meta_traits_data_std$elab_id), 
+                                                        K=nlevels(meta_traits_data_std$size_at_DOC),
+                                                        group=as.integer(meta_traits_data_std$size_at_DOC),
+                                                        age = meta_traits_data_std$age_std,
+                                                        metabolite = meta_traits_data_std$N.Ac.Phenylalanine),
+                                  refresh=0, show_messages=FALSE)
+
+```
+
+## Run Stan
+
+```{r}
+hier_reparam_fit2_v3_std <- stan(file="hlm_metabolite_reparam_v3.stan",
+                                 data=list(N=length(meta_traits_data_std$elab_id),
+                                           K=nlevels(meta_traits_data_std$size_at_DOC),
+                                           group=as.integer(meta_traits_data_std$size_at_DOC),
+                                           age = meta_traits_data_std$age_std,
+                                           metabolite = meta_traits_data_std$N.Ac.Phenylalanine))
+```
+
+```{r}
+test_sum <- as.data.frame(summary(hier_reparam_fit2_v3_std), reset_index=TRUE)
+#test_sum %>% filter(grepl("^beta[1]\\[", variable))$summary.mean
+test_sum %>% rownames_to_column(var = "Variable")
+```
+
+
+```{r}
+plot(hier_reparam_fit2_v3_std, pars=c("beta0[5]", "beta0[4]","beta0[3]","beta0[2]", "beta0[1]"))
+plot(hier_reparam_fit2_v3_std, pars=c("beta1[5]", "beta1[4]","beta1[3]","beta1[2]", "beta1[1]"))
+```
+
+
+
+## Posterior Interval
+
+```{r}
+hier_reparam_fit_v3_std$summary() %>% 
+  filter(grepl("^beta[1]\\[", variable)) %>% 
+  ggplot(aes(y=variable, x=mean, xmin=q5, xmax=q95)) +
+  geom_pointinterval() +
+  scale_y_discrete(labels = c("Giant", "Large", "Medium", "Standard", "Toy")) +
+  ggtitle("95% C.I. of N.Ac.Phenylalanine Abundance in Different Dog Sizes") +
+  xlab("Metabolite Abundance") +
+  ylab("Size")
+```
+
+Large diffrence bewteen Large to Giant due to lack of data? 
+
+## Shrinkage Plot
+
+```{r}
+# posterior mean
+post_means_v3 <- hier_reparam_fit_v3_std$summary() %>% 
+  select(variable, mean) %>% 
+  filter(grepl("^beta[01]\\[", variable))
+#mle_v3 <- coef(summary(lm(N.Ac.Phenylalanine ~ age_centered + size_at_DOC, data = meta_traits_data)))[2:3, 1]
+
+# MLE 
+grouped_data <- split(meta_traits_data_std, as.integer(meta_traits_data_std$size_at_DOC))
+lm_output <- lapply(grouped_data, function(data) lm(N.Ac.Phenylalanine ~ age_std, data = data))
+mle_coef_v3 <- lapply(lm_output, coef)
+mle_coef_v3 <- data.frame(do.call(rbind, mle_coef_v3)) # turn MLE list into a dataframe
+
+# data frame of PM and MLE of intercepts
+pm_mle_b1 <- data.frame(
+  size = c(1:5),
+  mle_b1 = mle_coef_v3$age_std,
+  pm_b1 = (post_means_v3 %>% filter(grepl("^beta[1]\\[", variable)) %>% select(mean))
+)
+
+global_mean_b1 <- hier_reparam_fit_v3_std$summary() %>% 
+  select(variable, mean) %>% 
+  filter(grepl("^mu_beta1", variable))
+
+
+# plot
+shrinkage_plot(pm_mle_b1$mle_b1, pm_mle_b1$mean, shrink_point=global_mean_b1$mean) 
+```
+
+
+## Fitted Values
+(generated quantities)
+
+```{r}
+hier_reparam_fit_v3_std$summary() %>% 
+  filter(grepl("^beta[0]\\[", variable))
+```
+
+```{r}
+# Extract beta's
+beta0_v3 <- hier_reparam_fit_v3_std$summary() %>% 
+  filter(grepl("^beta[0]\\[", variable))
+beta1_v3 <- hier_reparam_fit_v3_std$summary() %>% 
+  filter(grepl("^beta[1]\\[", variable))
+beta0_v3
+beta1_v3
+```
+```{r}
+ggplot(meta_traits_data_std, aes(x = age_std, y = N.Ac.Phenylalanine)) + 
+  geom_point() + 
+  geom_smooth(method = "lm", se = FALSE, fullrange = TRUE) + 
+  facet_wrap(~ size_at_DOC) +
+  
+  geom_abline(data=subset(meta_traits_data_std, size_at_DOC=="Giant"), aes(slope=0.5367173, intercept=0.029281847), size=1, color="red") +
+  geom_abline(data=subset(meta_traits_data_std, size_at_DOC=="Giant"), aes(slope=0.35238570	, intercept=-0.07349504), size=1, color="pink") + # lower
+  geom_abline(data=subset(meta_traits_data_std, size_at_DOC=="Giant"), aes(slope=0.7469767, intercept=0.17568825), size=1, color="pink") + # upper 
+  geom_ribbon(data=subset(meta_traits_data_std, size_at_DOC=="Giant"), aes(x=age_std, ymin=-0.07349504+(0.35238570*age_std), ymax=0.17568825+(0.7469767*age_std)), fill="pink") +
+  
+  geom_abline(data=subset(meta_traits_data_std, size_at_DOC=="Large"), aes(slope=0.2099390, intercept=-0.024043044), size=1, color="red") +
+  geom_abline(data=subset(meta_traits_data_std, size_at_DOC=="Medium"), aes(slope=0.3935481, intercept=-0.027091217), size=1, color="red") +
+  geom_abline(data=subset(meta_traits_data_std, size_at_DOC=="Standard"), aes(slope=0.4057697, intercept=-0.025849529), size=1, color="red") +
+  geom_abline(data=subset(meta_traits_data_std, size_at_DOC=="Toy"), aes(slope=0.4519261, intercept=-0.004283106), size=1, color="red") 
+```
+
+Makes sense for larger dogs to have more intense slope because they age quicker.
+
+# 2) Group by Size x Sterilization Status
+
+```{r}
+# Create new column for size x sterilization 
+meta_traits_data_std$size_x_sterilization <- paste(meta_traits_data_std$size_at_DOC, meta_traits_data_std$sterilization_status, sep = "-")
+meta_traits_data_std$size_x_sterilization <- as.factor(meta_traits_data_std$size_x_sterilization)
+# Even numbers are 1 (sterile), odd numbers are 0
+# 10 is Toy and 1 is Giant
+```
+
+```{r}
+hier_reparam_fit_v3_size_x_steril <- hier_reparam_model_v3$sample(data=list(N=length(meta_traits_data_std$elab_id), 
+                                                        K=nlevels(meta_traits_data_std$size_x_sterilization),
+                                                        group=as.integer(meta_traits_data_std$size_x_sterilization),
+                                                        age = meta_traits_data_std$age_std,
+                                                        metabolite = meta_traits_data_std$N.Ac.Phenylalanine),
+                                  refresh=0, show_messages=FALSE)
+```
+
+## Posterior Intervals
+
+```{r, fig.width=10cm, fig.height=5cm}
+library(gridExtra)
+par(mfrow=c(1,2))
+
+no_sterile_b1 <- hier_reparam_fit_v3_size_x_steril$summary() %>% 
+  filter(grepl("^beta[1]\\[[13579]\\]", variable)) %>% 
+  ggplot(aes(y=variable, x=mean, xmin=q5, xmax=q95)) +
+  geom_pointinterval() +
+  scale_x_continuous(limits=c(-0.25,1))
+
+sterile_b1 <- hier_reparam_fit_v3_size_x_steril$summary() %>% 
+  filter(grepl("^beta[1]\\[[02468]\\]", variable)) %>% 
+  ggplot(aes(y=variable, x=mean, xmin=q5, xmax=q95)) +
+  geom_pointinterval() +
+  scale_x_continuous(limits=c(-0.25,1))
+
+grid.arrange(no_sterile_b1, sterile_b1, ncol=2)
+```
+
+```{r, fig.width=8, fig.height=4}
+category_order <- c("beta1[1]", "beta1[2]", "beta1[3]", "beta1[4]", "beta1[5]", "beta1[6]", "beta1[7]", "beta1[8]", "beta1[9]", "beta1[10]")
+
+df_filtered <- hier_reparam_fit_v3_size_x_steril$summary() %>% 
+  filter(grepl("^beta1\\[(?:[1-9]|10)\\]", variable)) %>% 
+  mutate(integer = as.numeric(sub("^beta1\\[(?:[1-9]|10)\\]", "\\1", variable))) %>%
+  arrange(integer) 
+
+df_filtered$variable <- factor(df_filtered$variable, levels=category_order)
+levels(df_filtered$variable) <- c("Yes x Giant", "No x Giant", "Yes x Large", "No x Large", "Yes x Medium", "No x Medium", "Yes x Standard", "No x Standard", "Yes x Toy", "No x Toy")
+
+df_filtered$sterilization <- ifelse(grepl("Yes", df_filtered$variable), "sterile", "not sterile")
+
+# levels(df_filtered$variable) <- c("Giant", "Large", "Medium", "Standard", "Toy", "Giant", "Large", "Medium", "Standard", "Toy")
+
+ggplot(df_filtered, aes(y=variable, x=mean, xmin=q5, xmax=q95, color=sterilization)) +
+  geom_pointinterval() +
+  labs(x="Sterilization x Size", y="Metabolite Abundance",title = "95% C.I. of N.Ac.Phenylalanine Slope in Different Sterilization x Size of Dogs") 
+
+```
+
+
+```{r}
+hier_reparam_fit_v3_size_x_steril$summary() %>% 
+  filter(grepl("^beta[1]\\[", variable)) %>% 
+  ggplot(aes(y=variable, x=mean, xmin=q5, xmax=q95)) +
+  geom_pointinterval() 
+```
+
+Sterile (even) has more certainty.
+
+```{r}
+table(meta_traits_data_std$sterilization_status)
+```
+
+## Significance of Sterility 
+
+```{r}
+# See if the difference between sterile vs nonsterile is significant 
+
+# To measure the difference wouldn't it need to be paired? (beta11-beta12)
+as.data.frame(hier_reparam_fit_v3_size_x_steril$draws())
+#get_drawset(hier_reparam_fit_v3_size_x_steril, pars='mu_beta0')
+hier_reparam_fit_v3_size_x_steril$draws(format="df") %>% colnames()
+```
+
+## Shrinkage Plot
+
+```{r}
+# posterior mean
+post_means_sterile_v3 <- hier_reparam_fit_v3_size_x_steril$summary() %>% 
+  select(variable, mean) %>% 
+  filter(grepl("^beta[01]\\[", variable))
+#mle_v3 <- coef(summary(lm(N.Ac.Phenylalanine ~ age_centered + size_at_DOC, data = meta_traits_data)))[2:3, 1]
+
+# MLE 
+grouped_data <- split(meta_traits_data_std, as.integer(meta_traits_data_std$size_x_sterilization))
+lm_output <- lapply(grouped_data, function(data) lm(N.Ac.Phenylalanine ~ age_std, data = data))
+mle_coef_sterile_v3 <- lapply(lm_output, coef)
+mle_coef_sterile_v3 <- data.frame(do.call(rbind, mle_coef_sterile_v3)) # turn MLE list into a dataframe
+
+# data frame of PM and MLE of intercepts
+pm_mle_sterile_b1 <- data.frame(
+  size = c(1:10),
+  mle_b1 = mle_coef_sterile_v3$age_std,
+  pm_b1 = (post_means_v3 %>% filter(grepl("^beta[1]\\[", variable)) %>% select(mean))
+)
+pm_mle_sterile_b1
+
+# global mean
+global_mean_sterile_b1 <- hier_reparam_fit_v3_size_x_steril$summary() %>% 
+  select(variable, mean) %>% 
+  filter(grepl("^mu_beta1", variable))
+```
+
+```{r}
+shrinkage_plot(pm_mle_sterile_b1$mle_b1, pm_mle_sterile_b1$mean, shrink_point=global_mean_sterile_b1$mean)
+```
+
+
+# Is the robust difference between 1 and 2 common in other metabolites?
+
+Glycine shows negative correlation between age and abundance.
+
+```{r}
+# fit on another metabolite
+hier_reparam_fit_v3_std_glycine <- hier_reparam_model_v3$sample(data=list(N=length(meta_traits_data_std$elab_id), 
+                                                        K=nlevels(meta_traits_data_std$size_at_DOC),
+                                                        group=as.integer(meta_traits_data_std$size_at_DOC),
+                                                        age = meta_traits_data_std$age_std,
+                                                        metabolite = meta_traits_data_std$Glycine),
+                                  refresh=0, show_messages=FALSE)
+```
+
+```{r}
+b1_post_interval <- function(fit) {
+  fit$summary() %>% 
+    filter(grepl("^beta[]\\[", variable)) %>% 
+    ggplot(aes(y=variable, x=mean, xmin=q5, xmax=q95)) +
+   geom_pointinterval() 
+}
+
+b1_post_interval(hier_reparam_fit_v3_std_glycine)
+```
+
+```{r}
+ggplot(meta_traits_data_std, aes(x = age_std, y = Glycine)) + 
+  geom_point() + 
+  geom_smooth(method = "lm", se = FALSE, fullrange = TRUE) + 
+  facet_wrap(~ size_at_DOC)
+```
+
+
+```{r}
+# try another one
+hier_reparam_fit_v3_std_carnitine <- hier_reparam_model_v3$sample(data=list(N=length(meta_traits_data_std$elab_id), 
+                                                        K=nlevels(meta_traits_data_std$size_at_DOC),
+                                                        group=as.integer(meta_traits_data_std$size_at_DOC),
+                                                        age = meta_traits_data_std$age_std,
+                                                        metabolite = meta_traits_data_std$Carnitine),
+                                  refresh=0, show_messages=FALSE)
+```
+```{r}
+b1_post_interval(hier_reparam_fit_v3_std_carnitine)
+```
+
+No obvious pattern. Always more uncertain for Giant dogs (because less data). 
+
+```{r}
+ggplot(meta_traits_data_std, aes(x = age_std, y = Carnitine)) + 
+  geom_point() + 
+  geom_smooth(method = "lm", se = FALSE, fullrange = TRUE) + 
+  facet_wrap(~ size_at_DOC)
+```
+
+
+# 3) Group By Sex x Size
+
+```{r}
+# Create new column for size x sex 
+meta_traits_data_std$size_x_sex <- paste(meta_traits_data_std$size_at_DOC, meta_traits_data_std$sex, sep = "-")
+meta_traits_data_std$size_x_sex <- as.factor(meta_traits_data_std$size_x_sex)
+# Even numbers are 1 (sterile), odd numbers are 0
+# 10 is Toy and 1 is Giant
+
+hier_reparam_fit_v3_size_x_sex <- hier_reparam_model_v3$sample(data=list(N=length(meta_traits_data_std$elab_id), 
+                                                        K=nlevels(meta_traits_data_std$size_x_sex),
+                                                        group=as.integer(meta_traits_data_std$size_x_sex),
+                                                        age = meta_traits_data_std$age_std,
+                                                        metabolite = meta_traits_data_std$N.Ac.Phenylalanine),
+                                  refresh=0, show_messages=FALSE)
+```
+```{r}
+b1_post_interval(hier_reparam_fit_v3_size_x_sex)
+# Male = 1 (even), Female = 0 (odd)
+# 10 = toy, 1=giant
+```
+
+Has that curve pattern where from Large to Giant there is a jump
+
+# 4) Group by Metabolite 
+
+```{r}
+# Rearrange data so we're isoalte for giant size
+
+# Select elab_id, age, size, and all metabolites
+#head(meta_traits_data_std)
+#meta_traits_data_std[,27:164]
+
+meta_traits_data_std_long <- meta_traits_data_std %>%
+  pivot_longer(cols = colnames(meta_traits_data_std[,27:163]), names_to = "Metabolite", values_to = "Value")
+# Add age_std back
+meta_traits_data_std_long$age_std <- scale(meta_traits_data_std_long$age)[,1]
+head(meta_traits_data_std_long)
+
+# Filter just giant dogs
+meta_traits_data_std_long_giant <- meta_traits_data_std_long %>% filter(size_at_DOC == "Giant")
+dim(meta_traits_data_std_long_giant)
+# Make Metabolite categorical
+meta_traits_data_std_long_giant$Metabolite <- as.factor(meta_traits_data_std_long_giant$Metabolite)
+
+# Filter just toy dogs
+meta_traits_data_std_long_toy <- meta_traits_data_std_long %>% filter(size_at_DOC == "Toy")
+dim(meta_traits_data_std_long_toy)
+# Make Metabolite categorical
+meta_traits_data_std_long_toy$Metabolite <- as.factor(meta_traits_data_std_long_toy$Metabolite)
+```
+
+```{r}
+hier_reparam_fit_v3_giant <- hier_reparam_model_v3$sample(data=list(N=length(meta_traits_data_std_long_giant$elab_id), 
+                                                        K=nlevels(meta_traits_data_std_long_giant$Metabolite),
+                                                        group=as.integer(meta_traits_data_std_long_giant$Metabolite),
+                                                        age = meta_traits_data_std_long_giant$age_std,
+                                                        metabolite = meta_traits_data_std_long_giant$Value),
+                                  refresh=0, show_messages=FALSE)
+```
+
+```{r}
+giant_sum <- hier_reparam_fit_v3_giant$summary()
+giant_sum$not_intersecting_0 <- !((giant_sum$q5 <= 0) & (giant_sum$q95 >= 0)) 
+giant_sum <- giant_sum[order(giant_sum$mean), ]
+giant_sum_ordered <- giant_sum %>% arrange(mean)
+giant <- giant_sum %>% 
+  filter(grepl("^beta[1]\\[", variable)) %>% 
+  ggplot(aes(y=reorder(variable,mean), x=mean, xmin=q5, xmax=q95)) +
+  geom_pointinterval(aes(color = not_intersecting_0)) +
+  ggtitle(label="95% C.I. of Metabolite Abundance in Giant Dogs") +
+  ylab("Slope of Different Metabolites") +
+  xlab("Metabolite Abundance") +
+  scale_x_continuous(limit=c(-0.75,0.75)) 
+giant
+#ggplotly(giant, tooltip=c("variable"))
+```
+
+
+```{r}
+hier_reparam_fit_v3_toy <- hier_reparam_model_v3$sample(data=list(N=length(meta_traits_data_std_long_toy$elab_id), 
+                                                        K=nlevels(meta_traits_data_std_long_toy$Metabolite),
+                                                        group=as.integer(meta_traits_data_std_long_toy$Metabolite),
+                                                        age = meta_traits_data_std_long_toy$age_std,
+                                                        metabolite = meta_traits_data_std_long_toy$Value),
+                                  refresh=0, show_messages=FALSE)
+```
+
+```{r}
+toy_sum <- hier_reparam_fit_v3_toy$summary()
+toy_sum$not_intersecting_0 <- !((toy_sum$q5 <= 0) & (toy_sum$q95 >= 0)) 
+toy <- toy_sum %>% 
+  filter(grepl("^beta[1]\\[", variable)) %>% 
+  ggplot(aes(y=reorder(variable, mean), x=mean, xmin=q5, xmax=q95)) +
+  geom_pointinterval(aes(color = not_intersecting_0)) +
+  ggtitle(label="95% C.I. of Metabolite Abundance in Toy Dogs") +
+  ylab("Slope of Different Metabolites") +
+  xlab("Metabolite Abundance") +
+  scale_x_continuous(limit=c(-0.75,0.75)) 
+  # theme(axis.text.y = element_text(vjust = 10))  
+toy_sum
+```
+
+```{r}
+# replace each beta1 variable with number that maps to it
+
+## create a dataframe mapping of integer to metabolite name
+integers <- c(as.integer(meta_traits_data_std_long_toy$Metabolite))
+metas <- c(meta_traits_data_std_long_toy$Metabolite)
+meta_map <- data.frame(int=integers, metabolites=metas)
+
+toy_beta1 <- toy_sum %>% 
+  filter(grepl("^beta[1]\\[", variable))
+
+replace_with_mapping <- function(value) {
+  index <- as.numeric(gsub("beta1\\[(\\d+)\\]", "\\1", value))
+  mapped_value <- meta_map$metabolites[meta_map$int == index]
+  if (length(mapped_value) > 0) {
+    return(mapped_value)
+  } else {
+    return(NA)
+  }
+}
+
+# Apply the function to replace values
+toy_beta1$new_var <- sapply(toy_beta1$variable, replace_with_mapping)
+toy_beta1
+```
+
+```{r, fig.width=10, fig.height=13}
+toy_beta1$variable <- factor(toy_beta1$variable)
+levels(toy_beta1$variable) <- meta_traits_data_std_long_toy$Metabolite
+
+ggplot(toy_beta1, aes(y=reorder(variable, mean), x=mean, xmin=q5, xmax=q95)) +
+  geom_pointinterval(aes(color = not_intersecting_0)) +
+  ggtitle(label="95% C.I. of Metabolite Abundance in Toy Dogs") +
+  ylab("Slope of Different Metabolites") +
+  xlab("Metabolite Abundance") +
+  scale_x_continuous(limit=c(-0.75,0.75)) 
+```
+```{r, fig.width=10, fig.height=13}
+giant_beta1 <- giant_sum %>% 
+  filter(grepl("^beta[1]\\[", variable))
+giant_beta1$not_intersecting_0 <- !((giant_beta1$q5 <= 0) & (giant_beta1$q95 >= 0)) 
+
+giant_beta1$variable <- factor(giant_beta1$variable)
+levels(giant_beta1$variable) <- meta_traits_data_std_long_toy$Metabolite
+
+ggplot(giant_beta1, aes(y=reorder(variable, mean), x=mean, xmin=q5, xmax=q95)) +
+  geom_pointinterval(aes(color = not_intersecting_0)) +
+  ggtitle(label="95% C.I. of Metabolite Abundance in Giant Dogs") +
+  ylab("Slope of Different Metabolites") +
+  xlab("Metabolite Abundance") +
+  scale_x_continuous(limit=c(-0.75,0.75)) 
+```
+
+
+```{r}
+table(meta_traits_data_std$size_at_DOC)
+```
+```{r}
+hier_reparam_fit_v3_giant$summary() %>% 
+  filter(grepl("^beta[1]\\[", variable)) %>% 
+  filter(mean>0.5)
+```
+```{r}
+hier_reparam_fit_v3_giant$summary() %>% 
+  filter(grepl("^beta[1]\\[", variable)) 
+```
+
+```{r}
+all_meta <- meta_traits_data_std_long_toy$Metabolite
+meta_number <- as.integer(meta_traits_data_std_long_toy$Metabolite)
+cbind.data.frame(all_meta,meta_number)
+```
+
+```{r}
+data.frame(table(meta_traits_data_std$breed_1))
+```
+

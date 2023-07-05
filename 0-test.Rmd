@@ -1,0 +1,143 @@
+---
+title: "0-test"
+output: html_document
+date: "2023-03-25"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Import Packages and Data
+
+```{r}
+# EDA packages
+library(tidyverse)
+library(naniar)
+library(ggplot2)
+
+# Other
+library(reshape2)
+# library(magrittr)
+# library(testthat)
+library(cmdstanr)
+library(rstan)
+
+# Bayes rules
+library(bayesrules)
+library(rstanarm)
+library(broom.mixed)
+```
+
+
+```{r}
+clinical <- read.csv("data/raw/clinical.csv")
+overview <- read.csv("data/raw/overview.csv")
+```
+
+```{r}
+dim(clinical)
+nunique(clinical$dog_id)
+```
+
+```{r}
+head(overview)
+```
+```{r}
+names(overview)
+```
+# Tidy Data
+
+```{r}
+# Select all columns with protein stuff?
+clinical_proteins <- clinical[c('dog_id', 'Year', 'krt_cp_total_protein_value', 'krt_cp_albumin_value',        "krt_cp_globulins_value", "krt_cp_alb_glob_ratio_value","krt_cp_calcium_value", "krt_cp_phosphorus_value",    "krt_cp_magnesium_value", "krt_cp_glucose_value", "krt_cp_bun_value",           "krt_cp_creatinine_value", "krt_cp_bilirubin_total_value", "krt_cp_alkp_value",         "krt_cp_alt_value", "krt_cp_ggt_value", "krt_cp_amylase_value", "krt_cp_triglycerides_value")]
+
+head(clinical_proteins)
+```
+```{r}
+# Match age with dog_id and select relevant variables
+df_all <- merge(clinical_proteins, overview[, c('dog_id', 'Estimated_Age_Years_at_HLES', 'Breed', 'Breed_Status', 'Sex_Class_at_HLES', 'Weight_Class_5KGBin_at_HLES', 'Weight_Class_10KGBin_at_HLES', 'Breed_Size_Class_at_HLES')], by='dog_id', all.x=TRUE)
+head(df_all)
+```
+
+# EDA
+
+```{r}
+# Maybe only look at pure breed?
+ggplot(df_all) +
+  geom_point(aes(x=Estimated_Age_Years_at_HLES, y=krt_cp_total_protein_value, color=Breed_Size_Class_at_HLES))
+```
+## Testing Hierarchical Stuff
+
+### Complete Pooled
+
+```{r}
+complete_pooled_model_dogs <- stan_glm(
+  krt_cp_total_protein_value~Estimated_Age_Years_at_HLES,
+  data=df_all, family=gaussian,
+  prior_intercept = normal(0, 2.5, autoscale=TRUE), # beta_0
+  prior = normal(0, 2.5, autoscale=TRUE), # beta_1?
+  prior_aux = exponential(1, autoscale = TRUE),
+  chains=4, iter = 5000*2, seed = 84735)
+```
+
+```{r}
+tidy(complete_pooled_model_dogs, conf.int = TRUE, conf.level = 0.80)
+```
+
+```{r}
+ggplot(df_all, aes(x = Estimated_Age_Years_at_HLES, y = krt_cp_total_protein_value, group = Breed_Size_Class_at_HLES)) + 
+  geom_smooth(method = "lm", se = FALSE, color = "gray", size = 0.5) + 
+  geom_abline(aes(intercept = 6.19952962	, slope = 0.01842923), color = "blue")
+```
+
+### No Pooled
+
+```{r}
+ggplot(df_all, aes(x = Estimated_Age_Years_at_HLES, y = krt_cp_total_protein_value)) + 
+  geom_point() + 
+  geom_smooth(method = "lm", se = FALSE, fullrange = TRUE) + 
+  facet_wrap(~ Breed_Size_Class_at_HLES) 
+```
+
+Interesting to see that Giant, Large generally decrease while Small, Standard increase.
+
+```{r}
+# Check how many observations per breed
+df_all$Breed <- as.factor(df_all$Breed)
+df_all$Breed_Status <- as.factor(df_all$Breed_Status)
+
+df_all %>% count(Breed) %>% filter(n>=3)
+df_all %>% count(Breed_Status)
+```
+```{r}
+ggplot(df_all) +
+  geom_point(aes(x=Estimated_Age_Years_at_HLES, y=Sex_Class_at_HLES))
+
+ggplot(df_all) +
+  geom_point(aes(x=Estimated_Age_Years_at_HLES, y=Breed_Status))
+
+ggplot(df_all) +
+  geom_point(aes(x=Estimated_Age_Years_at_HLES, y=Breed_Size_Class_at_HLES))
+```
+
+# More in depth on breed
+
+## Basic visuals
+
+Sample sizes in some breeds are too small. Filter so that at least 3?
+
+```{r}
+top_breeds <- df_all %>% group_by(Breed) %>% filter(n() >= 3)
+```
+
+```{r}
+ggplot(top_breeds, aes(x = Estimated_Age_Years_at_HLES, y = krt_cp_total_protein_value)) + 
+  geom_point() + 
+  geom_smooth(method = "lm", se = FALSE, fullrange = TRUE) + 
+  facet_wrap(~ Breed) 
+```
+
+## Apply Bayes to Breed
+
+

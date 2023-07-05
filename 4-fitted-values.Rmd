@@ -1,0 +1,136 @@
+---
+title: "4-fitted-values"
+output: html_document
+date: "2023-05-15"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+hier_reparam_fit_v3_std$summary()
+```
+
+# Adding Generated Quantities Block
+
+```{r}
+hier_reparam_model_v4 <- cmdstan_model("hlm_meta_reparam_v4.stan")
+
+hier_reparam_fit_v4_std <- hier_reparam_model_v4$sample(data=list(N=length(meta_traits_data_std$elab_id), 
+                                                        K=nlevels(meta_traits_data_std$size_at_DOC),
+                                                        group=as.integer(meta_traits_data_std$size_at_DOC),
+                                                        age = meta_traits_data_std$age_std,
+                                                        metabolite = meta_traits_data_std$N.Ac.Phenylalanine,
+                                                        age_input=5),
+                                  refresh=0, show_messages=FALSE)
+
+```
+
+```{r}
+generated_quantities <- hier_reparam_fit_v4_std$draws("generated_metabolite")
+
+combined_draws <- as_tibble(generated_quantities) %>%
+  bind_rows()
+combined_draws
+```
+
+
+# Function for Fitted Values Based on Age
+
+```{r}
+# Produce a plot of the fitted values of metabolite abundance at a certain age
+fitted_vals_plot <- function(x_age, stan_fit) {
+  meta_beta1 <- (stan_fit$summary() %>% 
+      filter(grepl("^beta[1]\\[", variable)))$mean
+ 
+   meta_beta0 <- (stan_fit$summary() %>% 
+      filter(grepl("^beta[0]\\[", variable)))$mean
+   
+   sigma <- (stan_fit$summary() %>% filter(variable=='sigma'))$mean
+   
+   # generate 1000 values for each distribution? to use ggridge
+   
+   gen_df <- data.frame(
+    type = numeric(),
+    value = numeric(),
+    stringsAsFactors=F
+  )
+   
+   for (i in c(1:length(meta_beta0))) {
+     value <- rnorm(1000, meta_beta0[i]+(meta_beta1[i]*x_age))
+     type <- rep(i, 1000)
+     new_df <- data.frame(type, value)
+     gen_df <- rbind(gen_df, new_df)
+   }
+   gen_df$type <- as.factor(gen_df$type)
+   # levels(gen_df$type) <- c("Giant", "Large", "Medium", "Standard", "Toy")
+   
+   fit_plot <- ggplot(gen_df, aes(x=value, y=type)) + geom_density_ridges(scale=0.9) +
+     scale_y_discrete(labels = c("Giant", "Large", "Medium", "Standard", "Toy"))
+   return (fit_plot)
+   # or just plot distribution...
+}
+```
+
+## Test Function on Positively Correlated Metabolites
+
+```{r}
+#fitted_vals_plot(0, hier_reparam_fit_v4_std)
+fitted_vals_plot(1, hier_reparam_fit_v4_std) +
+  ggtitle("Fitted Values of N.Ac.Phenylalanine Abundance at Age 1") +
+  scale_x_continuous(limit=c(-4.5, 10))
+#fitted_vals_plot(7, hier_reparam_fit_v4_std)
+fitted_vals_plot(15, hier_reparam_fit_v4_std) +
+  ggtitle("Fitted Values of N.Ac.Phenylalanine Abundance at Age 10")+
+  scale_x_continuous(limit=c(-4.5, 10))
+```
+
+## Test Function on Negatively Correlated Metabolites
+
+```{r}
+fitted_vals_plot(5, hier_reparam_fit_v3_std_glycine)
+fitted_vals_plot(10, hier_reparam_fit_v3_std_glycine)
+```
+
+## Test Function on Sterilization x Age
+
+```{r}
+fitted_vals_plot(5, hier_reparam_fit_v3_size_x_steril)
+```
+
+## Test on Multicoefficient
+
+```{r}
+hier_reparam_model_v5 <- cmdstan_model("hlm_meta_reparam_v5.stan")
+
+hier_reparam_fit_v5_std <- hier_reparam_model_v5$sample(data=list(N=length(meta_traits_data_std$elab_id),
+                                           K=nlevels(meta_traits_data_std$size_at_DOC),
+                                           group=as.integer(meta_traits_data_std$size_at_DOC),
+                                           age = meta_traits_data_std$age_std,
+                                           sex = meta_traits_data_std$sex,
+                                           sterilization = meta_traits_data_std$sterilization_status,
+                                           metabolite = meta_traits_data_std$N.Ac.Phenylalanine), 
+                                           refresh=0, show_messages=FALSE)
+```
+
+```{r}
+fitted_vals_plot(5, hier_reparam_fit_v5_std)
+```
+
+```{r}
+hc <- meta_traits_data_std %>% select(X1.Methyladenosine:Xanthine) %>% t %>% dist %>% hclust
+
+cormat <- meta_traits_data_std %>% select(X1.Methyladenosine:Xanthine) %>% cor 
+Matrix(cormat[hc$order, hc$order]) %>% image
+
+nms <- meta_traits_data_std %>% select(X1.Methyladenosine:Xanthine) %>% colnames
+head(nms[hc$order])
+
+cor(meta_traits_data_std$Linolenic.Acid, meta_traits_data_std$Linoleic.Acid)
+# Difference btwn highly correlated metabolites
+# Looking at linear combo of these metabolites (together could be most predictive)
+# multivariate analysis 
+# run model on pc1, 2, 3, etc to see patterns
+```
+
